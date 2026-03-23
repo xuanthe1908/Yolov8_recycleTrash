@@ -1,0 +1,3 @@
+classes:
+  recyclable: true
+  non_recyclable: false

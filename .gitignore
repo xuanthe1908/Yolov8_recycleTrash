@@ -1,0 +1,6 @@
+.venv/
+.pylint_home/
+__pycache__/
+*.py[cod]
+runs/
+*.pt
