@@ -6,9 +6,9 @@
   - Sensor: E3F obstacle sensor (digital OUT)
   - Actuator: MG995/MG996 servo
 
-  Protocol from Python over serial:
-    C:R\n  -> recyclable
-    C:N\n  -> non-recyclable
+  Protocol:
+  - Arduino -> Python: TRIGGER\n when E3F sees an object
+  - Python  -> Arduino: C:R\n (recyclable), C:N\n (non-recyclable)
 */
 
 Servo pusherServo;
@@ -25,8 +25,10 @@ const int SERVO_NONREC_ANGLE = 145;
 const unsigned long PUSH_HOLD_MS = 420;
 const unsigned long RETURN_HOLD_MS = 280;
 const unsigned long SENSOR_DEBOUNCE_MS = 80;
+const unsigned long CLASS_WAIT_TIMEOUT_MS = 450;
 
-char pendingClass = 'N';  // Default to non-recyclable for safety.
+char pendingClass = 'N';  // Fallback class when timeout.
+bool classUpdated = false;
 unsigned long lastSensorTriggerMs = 0;
 
 void moveServoTo(int angleDeg) {
@@ -55,6 +57,7 @@ void parseSerialLine(String line) {
     char cls = line.charAt(2);
     if (cls == 'R' || cls == 'N') {
       pendingClass = cls;
+      classUpdated = true;
       Serial.print(F("ACK CLASS "));
       Serial.println(pendingClass);
       digitalWrite(PIN_LED, pendingClass == 'R' ? HIGH : LOW);
@@ -96,6 +99,18 @@ void setup() {
   Serial.println(F("SORTER READY"));
 }
 
+char waitClassAfterTrigger() {
+  classUpdated = false;
+  unsigned long start = millis();
+  while (millis() - start < CLASS_WAIT_TIMEOUT_MS) {
+    readSerialCommands();
+    if (classUpdated) {
+      return pendingClass;
+    }
+  }
+  return pendingClass;
+}
+
 void loop() {
   readSerialCommands();
 
@@ -103,9 +118,11 @@ void loop() {
   if (isObjectDetected()) {
     if (now - lastSensorTriggerMs > SENSOR_DEBOUNCE_MS) {
       lastSensorTriggerMs = now;
-      Serial.print(F("TRIGGER -> "));
-      Serial.println(pendingClass);
-      runPushCycle(pendingClass);
+      Serial.println(F("TRIGGER"));
+      char cls = waitClassAfterTrigger();
+      Serial.print(F("PUSH -> "));
+      Serial.println(cls);
+      runPushCycle(cls);
     }
   }
 }

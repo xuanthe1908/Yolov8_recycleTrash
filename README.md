@@ -168,6 +168,8 @@ Tham số hữu ích để giảm tracking loạn:
 - `--track-log-every 10`: giảm spam log.
 - `--track-max-missed 45`: giữ lịch sử ID qua vài frame mất tạm thời.
 - `--conf 0.35` hoặc cao hơn nếu còn nhiều box nhiễu.
+- `--queue-max-size 32`: số nhãn tối đa trong hàng đợi phân loại.
+- `--trigger-timeout-ms 800`: cảnh báo khi lâu không thấy trigger cảm biến từ Arduino.
 
 ### Chi bám 1 vật thể ở giữa khung hình
 
@@ -181,6 +183,78 @@ Tuỳ chỉnh nhanh:
 
 - `--center-window-ratio 0.35`: vùng trung tâm (tỉ lệ so với khung hình).
 - `--target-max-missed 20`: giữ lock ID hiện tại trong N frame bị mất trước khi chọn vật mới.
+
+---
+
+## Tích hợp Arduino cho băng tải thông minh
+
+Repo đã có firmware mẫu: `arduino/smart_conveyor_sorter.ino`.
+
+### Phần cứng đã hỗ trợ
+
+- Cảm biến vật cản hồng ngoại **E3F 6-36VDC** (đầu ra digital)
+- Servo đẩy **MG995 / MG996**
+- Vi điều khiển **Arduino Nano V3.0 (CH340G)**
+
+### Cơ chế hoạt động (mới)
+
+Thay vì Python gửi lệnh liên tục theo frame, hệ thống dùng cơ chế **trigger-based** để bám nhịp vật thật trên băng tải:
+
+1. YOLO track vật thể và đưa nhãn vào hàng đợi (`R` / `N`).
+2. Khi vật đi tới vị trí gạt, E3F kích hoạt.
+3. Arduino gửi `TRIGGER` lên máy tính.
+4. Python lấy phần tử đầu hàng đợi và gửi lại:
+   - `C:R` = recyclable
+   - `C:N` = non-recyclable
+5. Arduino điều khiển servo đẩy theo lệnh vừa nhận.
+
+### Giao thức serial
+
+- Arduino -> Python: `TRIGGER`
+- Python -> Arduino: `C:R` hoặc `C:N`
+- Arduino -> Python (debug): `ACK CLASS R|N`, `PUSH -> R|N`
+
+### Đấu nối tham khảo
+
+- **Servo MG995/MG996**
+  - Signal -> `D9` Nano
+  - Nguồn servo -> nguồn ngoài 5V đủ dòng
+  - GND servo nối chung GND Arduino
+- **Cảm biến E3F**
+  - OUT -> `D2` Nano
+  - GND -> GND chung
+  - VCC theo đúng model cảm biến
+
+> Lưu ý: nhiều E3F loại công nghiệp chạy 6-36V, cần đảm bảo mức OUT phù hợp ngõ vào 5V Arduino (qua module đệm/optocoupler/chia áp nếu cần).
+
+### Nạp firmware
+
+Mở Arduino IDE và nạp file:
+
+```bash
+arduino/smart_conveyor_sorter.ino
+```
+
+### Chạy Python + Arduino
+
+Ví dụ trên macOS:
+
+```bash
+python predict.py 0 \
+  --mode track \
+  --center-only \
+  --show \
+  --serial-port /dev/cu.wchusbserialXXXX \
+  --serial-baud 115200 \
+  --track-confirm-frames 4 \
+  --queue-max-size 32
+```
+
+Tìm đúng cổng serial:
+
+```bash
+ls /dev/cu.*
+```
 
 ---
 
@@ -202,6 +276,7 @@ classes:
 |-----------|---------|
 | `train.py` | Huấn luyện YOLO |
 | `predict.py` | Suy luận + in TÁI CHẾ / KHÔNG TÁI CHẾ |
+| `arduino/smart_conveyor_sorter.ino` | Firmware Nano: nhận trigger E3F, nhận class từ Python, điều khiển servo |
 | `plot_training.py` | Vẽ đồ thị từ `results.csv` |
 | `waste_yolo/recycling.py` | Đọc `config/recycling.yaml` |
 | `dataset/dataset.yaml` | 2 lớp detection |
@@ -212,6 +287,9 @@ classes:
 
 - **Hết VRAM:** giảm `--batch` hoặc `--imgsz`.
 - **`yolov8n.pt` mặc định:** không khớp dữ liệu của bạn — cần train ra `best.pt` rồi mới dùng cho `predict.py`.
+- **Không gửi được Arduino:** kiểm tra `--serial-port`, quyền truy cập cổng COM/tty, và đã cài `pyserial`.
+- **Servo rung hoặc reset Nano:** dùng nguồn ngoài cho servo, luôn nối chung GND.
+- **Đẩy sai nhịp vật:** tinh chỉnh vị trí camera/E3F, `--track-confirm-frames`, và góc servo trong file `.ino`.
 
 ---
 
