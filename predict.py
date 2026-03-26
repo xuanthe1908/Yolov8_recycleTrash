@@ -6,6 +6,7 @@ import argparse
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
+import time
 
 import cv2
 from ultralytics import YOLO
@@ -15,6 +16,56 @@ from waste_yolo.recycling import load_recycling_config
 ROOT = Path(__file__).resolve().parent
 BEST_PT = ROOT / "runs" / "detect" / "waste" / "weights" / "best.pt"
 BELT_TRACKER = ROOT / "config" / "tracker_belt.yaml"
+
+
+class ArduinoSortLink:
+    """Best-effort serial link to Arduino sorter."""
+
+    def __init__(self, port: str, baud: int, cooldown_s: float) -> None:
+        self._port = port
+        self._baud = baud
+        self._cooldown_s = max(cooldown_s, 0.0)
+        self._last_send_at = 0.0
+        self._last_payload = ""
+        self._ser = None
+
+        try:
+            import serial  # type: ignore
+        except Exception as exc:
+            print(f"[WARN] pyserial chưa có ({exc}). Bỏ qua gửi Arduino.")
+            return
+
+        try:
+            self._ser = serial.Serial(port=self._port, baudrate=self._baud, timeout=0.02)
+            print(f"[INFO] Arduino serial opened: {self._port} @ {self._baud}")
+            time.sleep(2.0)  # Nano CH340 often resets when serial opens.
+        except Exception as exc:
+            self._ser = None
+            print(f"[WARN] Không mở được serial {self._port}: {exc}")
+
+    @property
+    def ready(self) -> bool:
+        return self._ser is not None
+
+    def send_class(self, recyclable: bool, class_name: str, confidence: float) -> bool:
+        if not self._ser:
+            return False
+
+        payload = f"C:{'R' if recyclable else 'N'}\n"
+        now = time.time()
+        if payload == self._last_payload and (now - self._last_send_at) < self._cooldown_s:
+            return False
+
+        try:
+            self._ser.write(payload.encode("ascii"))
+            self._last_payload = payload
+            self._last_send_at = now
+            tag = "RECYCLABLE" if recyclable else "NON_RECYCLABLE"
+            print(f"[SERIAL] {payload.strip()} ({class_name}, {tag}, conf={confidence:.3f})")
+            return True
+        except Exception as exc:
+            print(f"[WARN] Gửi serial thất bại: {exc}")
+            return False
 
 
 def _default_weights() -> str:
@@ -85,6 +136,19 @@ def _parse_args() -> argparse.Namespace:
         help="So frame mat muc tieu truoc khi chon ID moi",
     )
     parser.add_argument("--show", action="store_true", help="Hiển thị khung hình")
+    parser.add_argument(
+        "--serial-port",
+        type=str,
+        default="",
+        help="Cổng serial Arduino, ví dụ /dev/cu.wchusbserial* hoặc COM3",
+    )
+    parser.add_argument("--serial-baud", type=int, default=115200, help="Baud rate serial")
+    parser.add_argument(
+        "--serial-cooldown",
+        type=float,
+        default=0.8,
+        help="Khoảng nghỉ tối thiểu giữa 2 lệnh giống nhau gửi Arduino (giây)",
+    )
     return parser.parse_args()
 
 
@@ -123,7 +187,12 @@ def _is_track_source(source: str) -> bool:
     return Path(s).suffix in {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}
 
 
-def _run_track_stream(model: YOLO, args: argparse.Namespace, mapping: dict[str, bool]) -> None:
+def _run_track_stream(
+    model: YOLO,
+    args: argparse.Namespace,
+    mapping: dict[str, bool],
+    arduino: ArduinoSortLink | None,
+) -> None:
     stream = model.track(
         source=int(args.source) if args.source.isdigit() else args.source,
         stream=True,
@@ -214,6 +283,10 @@ def _run_track_stream(model: YOLO, args: argparse.Namespace, mapping: dict[str, 
                     rec = mapping.get(label, False)
                     tag = "TAI CHE" if rec else "KHONG TAI CHE"
                     print(f"[F{frame_id}] TARGET ID {tid:03d} {label} -> {tag} (conf={float(cf):.3f})")
+                if seen_count[tid] >= args.track_confirm_frames and arduino and arduino.ready:
+                    label = names[int(cls_idx)]
+                    rec = mapping.get(label, False)
+                    arduino.send_class(rec, label, float(cf))
             elif not args.center_only:
                 for tid, cls_idx, cf, _x1, _y1, _x2, _y2 in rows:
                     # Chỉ công bố track khi đã ổn định vài frame, giảm track ảo trên băng tải.
@@ -222,6 +295,10 @@ def _run_track_stream(model: YOLO, args: argparse.Namespace, mapping: dict[str, 
                         rec = mapping.get(label, False)
                         tag = "TAI CHE" if rec else "KHONG TAI CHE"
                         print(f"[F{frame_id}] ID {tid:03d} {label} -> {tag} (conf={float(cf):.3f})")
+                    if seen_count[tid] >= args.track_confirm_frames and arduino and arduino.ready:
+                        label = names[int(cls_idx)]
+                        rec = mapping.get(label, False)
+                        arduino.send_class(rec, label, float(cf))
 
         for tid in list(seen_count.keys()):
             if tid not in active_ids:
@@ -254,10 +331,11 @@ def main() -> None:
     weights = args.weights or _default_weights()
     model = YOLO(weights)
     mapping = load_recycling_config()
+    arduino = ArduinoSortLink(args.serial_port, args.serial_baud, args.serial_cooldown) if args.serial_port else None
 
     use_track = args.mode == "track" or (args.mode == "auto" and _is_track_source(args.source))
     if use_track:
-        _run_track_stream(model, args, mapping)
+        _run_track_stream(model, args, mapping, arduino)
         return
 
     results = model.predict(
