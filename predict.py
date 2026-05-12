@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict, deque
+from collections import defaultdict
+import importlib
 from pathlib import Path
 from typing import Any
 import time
@@ -11,6 +12,7 @@ import time
 import cv2
 from ultralytics import YOLO
 
+from waste_yolo.accelerator import accelerator_label
 from waste_yolo.recycling import load_recycling_config
 
 ROOT = Path(__file__).resolve().parent
@@ -30,13 +32,13 @@ class ArduinoSortLink:
         self._ser = None
 
         try:
-            import serial  # type: ignore
+            serial_module = importlib.import_module("serial")
         except Exception as exc:
             print(f"[WARN] pyserial chưa có ({exc}). Bỏ qua gửi Arduino.")
             return
 
         try:
-            self._ser = serial.Serial(port=self._port, baudrate=self._baud, timeout=0.02)
+            self._ser = serial_module.Serial(port=self._port, baudrate=self._baud, timeout=0.02)
             print(f"[INFO] Arduino serial opened: {self._port} @ {self._baud}")
             time.sleep(2.0)  # Nano CH340 often resets when serial opens.
         except Exception as exc:
@@ -62,35 +64,6 @@ class ArduinoSortLink:
             self._last_send_at = now
             tag = "RECYCLABLE" if recyclable else "NON_RECYCLABLE"
             print(f"[SERIAL] {payload.strip()} ({class_name}, {tag}, conf={confidence:.3f})")
-            return True
-        except Exception as exc:
-            print(f"[WARN] Gửi serial thất bại: {exc}")
-            return False
-
-    def read_lines(self) -> list[str]:
-        if not self._ser:
-            return []
-        out: list[str] = []
-        try:
-            while self._ser.in_waiting > 0:
-                line = self._ser.readline().decode("utf-8", errors="ignore").strip()
-                if line:
-                    out.append(line)
-        except Exception:
-            return out
-        return out
-
-    def send_class_code(self, class_code: str) -> bool:
-        if not self._ser:
-            return False
-        if class_code not in {"R", "N"}:
-            return False
-        payload = f"C:{class_code}\n"
-        try:
-            self._ser.write(payload.encode("ascii"))
-            self._last_payload = payload
-            self._last_send_at = time.time()
-            print(f"[SERIAL] {payload.strip()}")
             return True
         except Exception as exc:
             print(f"[WARN] Gửi serial thất bại: {exc}")
@@ -178,18 +151,6 @@ def _parse_args() -> argparse.Namespace:
         default=0.8,
         help="Khoảng nghỉ tối thiểu giữa 2 lệnh giống nhau gửi Arduino (giây)",
     )
-    parser.add_argument(
-        "--queue-max-size",
-        type=int,
-        default=32,
-        help="Số phần tử tối đa trong hàng đợi phân loại cho băng tải",
-    )
-    parser.add_argument(
-        "--trigger-timeout-ms",
-        type=int,
-        default=800,
-        help="Timeout chờ trigger cảm biến từ Arduino (chỉ để log theo dõi)",
-    )
     return parser.parse_args()
 
 
@@ -254,21 +215,6 @@ def _run_track_stream(
     should_show = args.show or args.source.isdigit()
     target_id: int | None = None
     target_missed = 0
-    queued_ids: set[int] = set()
-    class_queue: deque[str] = deque()
-    last_trigger_at = time.time()
-
-    def enqueue_class(tid: int, recyclable: bool) -> None:
-        nonlocal class_queue
-        if tid in queued_ids:
-            return
-        if len(class_queue) >= max(args.queue_max_size, 1):
-            dropped = class_queue.popleft()
-            print(f"[QUEUE] full -> drop oldest {dropped}")
-        cls_code = "R" if recyclable else "N"
-        class_queue.append(cls_code)
-        queued_ids.add(tid)
-        print(f"[QUEUE] add ID {tid:03d} -> {cls_code} (size={len(class_queue)})")
 
     for r in stream:
         frame_id += 1
@@ -339,10 +285,10 @@ def _run_track_stream(
                     rec = mapping.get(label, False)
                     tag = "TAI CHE" if rec else "KHONG TAI CHE"
                     print(f"[F{frame_id}] TARGET ID {tid:03d} {label} -> {tag} (conf={float(cf):.3f})")
-                if seen_count[tid] >= args.track_confirm_frames:
+                if seen_count[tid] >= args.track_confirm_frames and arduino and arduino.ready:
                     label = names[int(cls_idx)]
                     rec = mapping.get(label, False)
-                    enqueue_class(tid, rec)
+                    arduino.send_class(rec, label, float(cf))
             elif not args.center_only:
                 for tid, cls_idx, cf, _x1, _y1, _x2, _y2 in rows:
                     # Chỉ công bố track khi đã ổn định vài frame, giảm track ảo trên băng tải.
@@ -351,10 +297,10 @@ def _run_track_stream(
                         rec = mapping.get(label, False)
                         tag = "TAI CHE" if rec else "KHONG TAI CHE"
                         print(f"[F{frame_id}] ID {tid:03d} {label} -> {tag} (conf={float(cf):.3f})")
-                    if seen_count[tid] >= args.track_confirm_frames:
+                    if seen_count[tid] >= args.track_confirm_frames and arduino and arduino.ready:
                         label = names[int(cls_idx)]
                         rec = mapping.get(label, False)
-                        enqueue_class(tid, rec)
+                        arduino.send_class(rec, label, float(cf))
 
         for tid in list(seen_count.keys()):
             if tid not in active_ids:
@@ -362,25 +308,6 @@ def _run_track_stream(
                 if missed_count[tid] > args.track_max_missed:
                     seen_count.pop(tid, None)
                     missed_count.pop(tid, None)
-                    queued_ids.discard(tid)
-
-        if arduino and arduino.ready:
-            lines = arduino.read_lines()
-            for line in lines:
-                if line == "TRIGGER":
-                    last_trigger_at = time.time()
-                    if class_queue:
-                        cls_code = class_queue.popleft()
-                        arduino.send_class_code(cls_code)
-                        print(f"[QUEUE] trigger -> send {cls_code} (left={len(class_queue)})")
-                    else:
-                        arduino.send_class_code("N")
-                        print("[QUEUE] trigger but empty -> fallback N")
-                elif line.startswith("ACK"):
-                    print(f"[ARDUINO] {line}")
-            if (time.time() - last_trigger_at) * 1000.0 > max(args.trigger_timeout_ms, 100):
-                last_trigger_at = time.time()
-                print(f"[WARN] Không thấy TRIGGER > {args.trigger_timeout_ms}ms (check E3F/alignment)")
 
         if should_show:
             img = r.plot()
@@ -403,6 +330,8 @@ def _run_track_stream(
 
 def main() -> None:
     args = _parse_args()
+    if not args.device:
+        print(f"[INFO] device=(auto) — phát hiện: {accelerator_label()}")
     weights = args.weights or _default_weights()
     model = YOLO(weights)
     mapping = load_recycling_config()

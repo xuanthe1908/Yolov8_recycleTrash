@@ -44,19 +44,43 @@ sau đó **xóa** `raw/standardized_256/` và `raw/standardized_384/` (trùng đ
 
 ## Yêu cầu
 
-- Python 3.10+ (khuyến nghị)
-- (Tuỳ chọn) GPU NVIDIA + CUDA
+- Python **3.10+**, bản cài **64-bit** (bắt buộc trên Windows; trên Apple Silicon nên dùng Python **arm64** để dùng MPS).
+- **macOS Apple Silicon (M1/M2/M3/…):** GPU qua **MPS** (Metal). Cài Python arm64 từ [python.org](https://www.python.org/downloads/) hoặc Homebrew `arch -arm64 brew install python@3.12` — tránh chạy Python x86_64 qua Rosetta nếu bạn muốn MPS.
+- **Windows 11:** Python 64-bit từ [python.org](https://www.python.org/downloads/windows/); (tuỳ chọn) **NVIDIA GPU + CUDA** — xem bước PyTorch bên dưới.
 
 ---
 
 ## Cài đặt
 
+### macOS (Apple Silicon hoặc Intel)
+
 ```bash
 cd /đường/tới/Yolov8
 python3 -m venv .venv
 source .venv/bin/activate
+pip install -U pip
 pip install -r requirements.txt
 ```
+
+Kiểm tra Python đang là arm64 (Silicon): `python3 -c "import platform; print(platform.machine())"` → `arm64`.
+
+### Windows 11 (PowerShell hoặc CMD)
+
+```bat
+cd C:\đường\tới\Yolov8
+py -3 -m venv .venv
+.venv\Scripts\activate
+python -m pip install -U pip
+pip install -r requirements.txt
+```
+
+Nếu `py` không có, dùng đường dẫn đầy đủ tới `python.exe` sau khi cài Python.
+
+**GPU NVIDIA (Windows):** bộ `requirements.txt` dùng PyTorch mà Ultralytics kéo từ PyPI (thường là bản CPU trên Windows). Để train/inference nhanh trên CUDA, sau bước trên hãy cài PyTorch đúng phiên bản CUDA theo hướng dẫn trên [pytorch.org](https://pytorch.org/get-started/locally/) (chọn *Windows*, *Pip*, *CUDA* phù hợp driver), rồi chạy lại `pip install -r requirements.txt` nếu cần để đồng bộ `ultralytics`.
+
+**Giao diện tiếng Việt trong terminal Windows:** nếu ký tự lỗi, bật UTF-8: trong PowerShell tạm thời `$env:PYTHONUTF8=1`, hoặc Bảng điều khiển Windows → **Beta: Use Unicode UTF-8**.
+
+Sau khi cài, `train.py` và `predict.py` in một dòng **phát hiện** (CUDA / MPS / CPU) khi bạn không truyền `--device`.
 
 ---
 
@@ -104,13 +128,21 @@ python train.py
 
 **Output:** `runs/detect/waste/weights/best.pt`
 
-Trên **Mac Apple Silicon**, nên dùng GPU Metal để nhanh hơn CPU:
+Trên **Mac Apple Silicon**, ưu tiên **MPS**:
 
 ```bash
 python train.py --device mps --epochs 30 --batch 16
 ```
 
-(Giảm `--batch` nếu hết bộ nhớ.)
+(Giảm `--batch` nếu hết bộ nhớ. Một số op có thể fallback CPU; nếu lỗi hiếm với MPS, thử `--device cpu`.)
+
+Trên **Windows 11 có NVIDIA**, sau khi cài PyTorch + CUDA đúng bản, ví dụ:
+
+```bash
+python train.py --device 0 --epochs 30 --batch 16
+```
+
+`0` là GPU đầu tiên. Không có CUDA: bỏ `--device` hoặc dùng `--device cpu`.
 
 ---
 
@@ -146,6 +178,8 @@ Nếu đã có `runs/detect/waste/weights/best.pt`, có thể bỏ `--weights` (
 python predict.py 0
 ```
 
+(Cố định GPU: thêm `--device mps` trên Apple Silicon hoặc `--device 0` trên Windows có CUDA.)
+
 Cửa sổ hiển thị luồng; nhấn **`q`** để thoát. Mỗi ~15 frame in log một lần (tên lớp + TÁI CHẾ / KHÔNG TÁI CHẾ).
 
 ### Tracking cho băng tải (khuyến nghị)
@@ -168,8 +202,6 @@ Tham số hữu ích để giảm tracking loạn:
 - `--track-log-every 10`: giảm spam log.
 - `--track-max-missed 45`: giữ lịch sử ID qua vài frame mất tạm thời.
 - `--conf 0.35` hoặc cao hơn nếu còn nhiều box nhiễu.
-- `--queue-max-size 32`: số nhãn tối đa trong hàng đợi phân loại.
-- `--trigger-timeout-ms 800`: cảnh báo khi lâu không thấy trigger cảm biến từ Arduino.
 
 ### Chi bám 1 vật thể ở giữa khung hình
 
@@ -237,7 +269,7 @@ arduino/smart_conveyor_sorter.ino
 
 ### Chạy Python + Arduino
 
-Ví dụ trên macOS:
+Ví dụ trên **macOS** (cổng USB serial thường là `/dev/cu.*`):
 
 ```bash
 python predict.py 0 \
@@ -246,8 +278,7 @@ python predict.py 0 \
   --show \
   --serial-port /dev/cu.wchusbserialXXXX \
   --serial-baud 115200 \
-  --track-confirm-frames 4 \
-  --queue-max-size 32
+  --track-confirm-frames 4
 ```
 
 Tìm đúng cổng serial:
@@ -255,6 +286,14 @@ Tìm đúng cổng serial:
 ```bash
 ls /dev/cu.*
 ```
+
+Ví dụ trên **Windows 11** (thay bằng cổng trong Device Manager, ví dụ `COM3`):
+
+```bat
+python predict.py 0 --mode track --center-only --show --serial-port COM3 --serial-baud 115200 --track-confirm-frames 4
+```
+
+Trong **Device Manager** → Ports (COM & LPT) xem tên cổng của adapter USB–UART (CH340, CP210x, …).
 
 ---
 
@@ -279,6 +318,7 @@ classes:
 | `arduino/smart_conveyor_sorter.ino` | Firmware Nano: nhận trigger E3F, nhận class từ Python, điều khiển servo |
 | `plot_training.py` | Vẽ đồ thị từ `results.csv` |
 | `waste_yolo/recycling.py` | Đọc `config/recycling.yaml` |
+| `waste_yolo/accelerator.py` | Gợi ý thiết bị PyTorch (CUDA / MPS / CPU) |
 | `dataset/dataset.yaml` | 2 lớp detection |
 
 ---

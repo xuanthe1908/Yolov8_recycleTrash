@@ -9,6 +9,8 @@ from typing import Any
 
 from ultralytics import YOLO
 
+from waste_yolo.accelerator import accelerator_label
+
 ROOT = Path(__file__).resolve().parent
 SAVE_DIR = ROOT / "runs" / "detect" / "waste"
 
@@ -61,7 +63,7 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="", help="cpu | mps | 0 | 0,1 ...")
     args = parser.parse_args()
 
-    dev = args.device or "(auto)"
+    dev = args.device or "(auto — Ultralytics chọn)"
     _flush_print("=" * 60)
     _flush_print("BẮT ĐẦU TRAIN")
     _flush_print(f"  data     : {args.data}")
@@ -70,6 +72,8 @@ def main() -> None:
     _flush_print(f"  imgsz    : {args.imgsz}")
     _flush_print(f"  batch    : {args.batch}")
     _flush_print(f"  device   : {dev}")
+    if not args.device:
+        _flush_print(f"  phát hiện: {accelerator_label()}")
     _flush_print(f"  save_dir : {SAVE_DIR}")
     _flush_print("  (Ultralytics in loss từng batch; sau mỗi epoch có dòng >>> Tiến độ)")
     _flush_print("=" * 60)
