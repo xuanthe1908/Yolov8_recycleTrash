@@ -9,7 +9,7 @@ from typing import Any
 
 from ultralytics import YOLO
 
-from waste_yolo.accelerator import accelerator_label
+from waste_yolo.accelerator import accelerator_label, preferred_device_for_ultralytics
 
 ROOT = Path(__file__).resolve().parent
 SAVE_DIR = ROOT / "runs" / "detect" / "waste"
@@ -63,7 +63,8 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="", help="cpu | mps | 0 | 0,1 ...")
     args = parser.parse_args()
 
-    dev = args.device or "(auto — Ultralytics chọn)"
+    resolved_device = (args.device or "").strip() or preferred_device_for_ultralytics()
+    dev = resolved_device if resolved_device else "(auto — Ultralytics chọn)"
     _flush_print("=" * 60)
     _flush_print("BẮT ĐẦU TRAIN")
     _flush_print(f"  data     : {args.data}")
@@ -72,8 +73,10 @@ def main() -> None:
     _flush_print(f"  imgsz    : {args.imgsz}")
     _flush_print(f"  batch    : {args.batch}")
     _flush_print(f"  device   : {dev}")
-    if not args.device:
+    if not (args.device or "").strip():
         _flush_print(f"  phát hiện: {accelerator_label()}")
+        if resolved_device:
+            _flush_print(f"  (mặc định Apple Silicon / CUDA: dùng {resolved_device})")
     _flush_print(f"  save_dir : {SAVE_DIR}")
     _flush_print("  (Ultralytics in loss từng batch; sau mỗi epoch có dòng >>> Tiến độ)")
     _flush_print("=" * 60)
@@ -85,7 +88,7 @@ def main() -> None:
         epochs=args.epochs,
         imgsz=args.imgsz,
         batch=args.batch,
-        device=args.device or None,
+        device=resolved_device,
         project=str(ROOT / "runs" / "detect"),
         name="waste",
         exist_ok=True,

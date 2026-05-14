@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 import importlib
+import sys
 from pathlib import Path
 from typing import Any
 import time
@@ -12,7 +13,7 @@ import time
 import cv2
 from ultralytics import YOLO
 
-from waste_yolo.accelerator import accelerator_label
+from waste_yolo.accelerator import accelerator_label, preferred_device_for_ultralytics
 from waste_yolo.recycling import load_recycling_config
 
 ROOT = Path(__file__).resolve().parent
@@ -21,7 +22,7 @@ BELT_TRACKER = ROOT / "config" / "tracker_belt.yaml"
 
 
 class ArduinoSortLink:
-    """Best-effort serial link to Arduino sorter."""
+    """Best-effort serial link to ESP8266 / Arduino-class MCU sorter."""
 
     def __init__(self, port: str, baud: int, cooldown_s: float) -> None:
         self._port = port
@@ -39,8 +40,8 @@ class ArduinoSortLink:
 
         try:
             self._ser = serial_module.Serial(port=self._port, baudrate=self._baud, timeout=0.02)
-            print(f"[INFO] Arduino serial opened: {self._port} @ {self._baud}")
-            time.sleep(2.0)  # Nano CH340 often resets when serial opens.
+            print(f"[INFO] Serial sorter opened: {self._port} @ {self._baud}")
+            time.sleep(2.0)  # USB-UART (CH340/CP2102) often resets ESP8266 on open.
         except Exception as exc:
             self._ser = None
             print(f"[WARN] Không mở được serial {self._port}: {exc}")
@@ -76,9 +77,55 @@ def _default_weights() -> str:
     return str(ROOT / "yolov8n.pt")
 
 
+def _resolve_inference_device(cli_device: str) -> str | None:
+    """Ultralytics ``device``: user override, else MPS/CUDA default, else CPU path."""
+    manual = (cli_device or "").strip()
+    if manual:
+        return manual
+    return preferred_device_for_ultralytics()
+
+
+def _list_opencv_camera_indices(max_index: int) -> list[int]:
+    """OpenCV camera indices that open and return a frame (hữu ích tìm iPhone / Continuity Camera)."""
+    apis: list[int | None] = [None]
+    if sys.platform == "darwin" and hasattr(cv2, "CAP_AVFOUNDATION"):
+        apis.append(int(cv2.CAP_AVFOUNDATION))
+
+    out: list[int] = []
+    for i in range(max(0, max_index) + 1):
+        opened = False
+        for api in apis:
+            cap = cv2.VideoCapture(i) if api is None else cv2.VideoCapture(i, api)
+            if not cap.isOpened():
+                cap.release()
+                continue
+            ok = False
+            for _ in range(5):
+                ok, frame = cap.read()
+                if ok and frame is not None and frame.size > 0:
+                    break
+                time.sleep(0.02)
+            cap.release()
+            if ok:
+                opened = True
+                break
+        if opened:
+            out.append(i)
+    return out
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Predict + phân loại tái chế")
-    parser.add_argument("source", help="Ảnh, thư mục, video, hoặc 0 = webcam")
+    parser.add_argument(
+        "source",
+        nargs="?",
+        default="0",
+        help=(
+            "Ảnh, thư mục, video, chỉ mục camera (0,1,…), hoặc URL (rtsp/http). "
+            "Mac + iPhone: Continuity/USB thường là 1 nếu 0 là FaceTime HD — "
+            "chạy --list-cameras để xem index."
+        ),
+    )
     parser.add_argument(
         "--weights",
         type=str,
@@ -87,7 +134,26 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--imgsz", type=int, default=640)
-    parser.add_argument("--device", type=str, default="")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="",
+        help=(
+            "cpu | mps | 0 | … Để trống: ưu tiên CUDA rồi MPS (Apple Silicon); "
+            "trên Mac inference dùng Metal ổn định."
+        ),
+    )
+    parser.add_argument(
+        "--list-cameras",
+        action="store_true",
+        help="Liệt kê index camera OpenCV mở được (iPhone/Continuity thường khác 0), thoát.",
+    )
+    parser.add_argument(
+        "--list-camera-max",
+        type=int,
+        default=10,
+        help="Thử index 0..N với --list-cameras (mặc định 10).",
+    )
     parser.add_argument("--save", action="store_true", help="Lưu ảnh/video kết quả")
     parser.add_argument(
         "--mode",
@@ -142,7 +208,7 @@ def _parse_args() -> argparse.Namespace:
         "--serial-port",
         type=str,
         default="",
-        help="Cổng serial Arduino, ví dụ /dev/cu.wchusbserial* hoặc COM3",
+        help="Cổng serial ESP8266/USB-UART, ví dụ /dev/cu.*, /dev/ttyUSB0 hoặc COM3",
     )
     parser.add_argument("--serial-baud", type=int, default=115200, help="Baud rate serial")
     parser.add_argument(
@@ -194,13 +260,14 @@ def _run_track_stream(
     args: argparse.Namespace,
     mapping: dict[str, bool],
     arduino: ArduinoSortLink | None,
+    device: str | None,
 ) -> None:
     stream = model.track(
         source=int(args.source) if args.source.isdigit() else args.source,
         stream=True,
         conf=args.conf,
         imgsz=args.imgsz,
-        device=args.device or None,
+        device=device,
         tracker=args.tracker,
         persist=True,
         save=args.save,
@@ -330,8 +397,25 @@ def _run_track_stream(
 
 def main() -> None:
     args = _parse_args()
-    if not args.device:
-        print(f"[INFO] device=(auto) — phát hiện: {accelerator_label()}")
+    if args.list_cameras:
+        mx = max(0, args.list_camera_max)
+        print(f"[INFO] Đang thử mở camera index 0..{mx} (OpenCV; Mac dùng thêm AVFoundation nếu cần)…")
+        ids = _list_opencv_camera_indices(mx)
+        if not ids:
+            print("  (không mở được camera nào — cấp quyền Camera cho Terminal/Python, thử cắm iPhone)")
+        else:
+            print("  Index mở được:", ", ".join(str(i) for i in ids))
+            print("  Gợi ý: python predict.py <index> --mode track --show")
+        return
+
+    run_device = _resolve_inference_device(args.device)
+    if (args.device or "").strip():
+        print(f"[INFO] device={run_device} — {accelerator_label()}")
+    elif run_device:
+        print(f"[INFO] device={run_device} (mặc định Mac Silicon/CUDA) — {accelerator_label()}")
+    else:
+        print(f"[INFO] device=(CPU) — {accelerator_label()}")
+
     weights = args.weights or _default_weights()
     model = YOLO(weights)
     mapping = load_recycling_config()
@@ -339,14 +423,14 @@ def main() -> None:
 
     use_track = args.mode == "track" or (args.mode == "auto" and _is_track_source(args.source))
     if use_track:
-        _run_track_stream(model, args, mapping, arduino)
+        _run_track_stream(model, args, mapping, arduino, run_device)
         return
 
     results = model.predict(
         source=args.source,
         conf=args.conf,
         imgsz=args.imgsz,
-        device=args.device or None,
+        device=run_device,
         save=args.save,
         project=str(ROOT / "runs" / "predict"),
         name="waste",

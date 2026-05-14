@@ -128,21 +128,23 @@ python train.py
 
 **Output:** `runs/detect/waste/weights/best.pt`
 
-Trên **Mac Apple Silicon**, ưu tiên **MPS**:
+Trên **Mac Apple Silicon**, nếu không truyền `--device`, **`train.py` tự chọn `mps`** (Metal) khi PyTorch hỗ trợ:
 
 ```bash
-python train.py --device mps --epochs 30 --batch 16
+python train.py --epochs 30 --batch 16
 ```
+
+Vẫn có thể chỉ định tay: `python train.py --device mps ...`
 
 (Giảm `--batch` nếu hết bộ nhớ. Một số op có thể fallback CPU; nếu lỗi hiếm với MPS, thử `--device cpu`.)
 
-Trên **Windows 11 có NVIDIA**, sau khi cài PyTorch + CUDA đúng bản, ví dụ:
+Trên **Windows 11 có NVIDIA**, sau khi cài PyTorch + CUDA đúng bản, không truyền `--device` sẽ ưu tiên GPU `0`; hoặc chỉ định:
 
 ```bash
 python train.py --device 0 --epochs 30 --batch 16
 ```
 
-`0` là GPU đầu tiên. Không có CUDA: bỏ `--device` hoặc dùng `--device cpu`.
+`0` là GPU đầu tiên. Máy không có CUDA / không có MPS: để trống `--device` sẽ dùng CPU (Ultralytics).
 
 ---
 
@@ -174,13 +176,30 @@ Nếu đã có `runs/detect/waste/weights/best.pt`, có thể bỏ `--weights` (
 
 ### Webcam (camera)
 
+**Mac Apple Silicon:** không cần truyền `--device` — **`predict.py` tự dùng `mps`** khi có Metal.
+
 ```bash
-python predict.py 0
+python predict.py 0 --show
 ```
 
-(Cố định GPU: thêm `--device mps` trên Apple Silicon hoặc `--device 0` trên Windows có CUDA.)
+### iPhone làm camera (thử trên Mac)
 
-Cửa sổ hiển thị luồng; nhấn **`q`** để thoát. Mỗi ~15 frame in log một lần (tên lớp + TÁI CHẾ / KHÔNG TÁI CHẾ).
+- **Continuity Camera** (cáp USB) hoặc camera tích hợp: iPhone thường là **một chỉ mục khác** với FaceTime HD (hay gặp `0` = Mac, `1` = iPhone).
+- Liệt kê index OpenCV mở được:
+
+```bash
+python predict.py --list-cameras
+```
+
+Sau đó chạy với index đúng, ví dụ:
+
+```bash
+python predict.py 1 --mode track --show
+```
+
+Nếu máy có **NVIDIA**: mặc định dùng `0`; hoặc truyền `--device cpu` khi cần.
+
+Cửa sổ hiển thị luồng; nhấn **`q`** để thoát. Mỗi ~15 frame in log một lần (tên lớp + TÁI CHẾ / KHÔNG TÁI CHẾ) tùy `--track-log-every`.
 
 ### Tracking cho băng tải (khuyến nghị)
 
@@ -218,56 +237,50 @@ Tuỳ chỉnh nhanh:
 
 ---
 
-## Tích hợp Arduino cho băng tải thông minh
+## Tích hợp ESP8266 cho băng tải thông minh
 
-Repo đã có firmware mẫu: `arduino/smart_conveyor_sorter.ino`.
+Repo có firmware mẫu: `arduino/smart_conveyor_sorter.ino` (chỉ biên dịch khi chọn board **ESP8266** trong Arduino IDE).
 
 ### Phần cứng đã hỗ trợ
 
-- Cảm biến vật cản hồng ngoại **E3F 6-36VDC** (đầu ra digital)
-- Servo đẩy **MG995 / MG996**
-- Vi điều khiển **Arduino Nano V3.0 (CH340G)**
+- **ESP8266** (NodeMCU 1.0, Wemos D1 mini, v.v.) — nạp qua USB (thường CH340 / CP2102)
+- Cảm biến vật cản hồng ngoại **E3F** (đầu ra digital; cấp nguồn theo datasheet)
+- Servo đẩy **MG995 / MG996** (khuyến nghị **nguồn 5 V riêng**, GND chung với ESP8266)
 
-### Cơ chế hoạt động (mới)
+### Cơ chế hoạt động
 
-Thay vì Python gửi lệnh liên tục theo frame, hệ thống dùng cơ chế **trigger-based** để bám nhịp vật thật trên băng tải:
+1. YOLO track vật và (khi đủ frame xác nhận) gửi `C:R` / `C:N` qua USB serial nếu bạn bật `--serial-port`.
+2. Khi vật đến vị trí gạt, **E3F** kích hoạt; firmware gửi `TRIGGER` và trong cửa sổ thời gian ngắn chờ lệnh `C:R` / `C:N` rồi chạy chu kỳ servo.
 
-1. YOLO track vật thể và đưa nhãn vào hàng đợi (`R` / `N`).
-2. Khi vật đi tới vị trí gạt, E3F kích hoạt.
-3. Arduino gửi `TRIGGER` lên máy tính.
-4. Python lấy phần tử đầu hàng đợi và gửi lại:
-   - `C:R` = recyclable
-   - `C:N` = non-recyclable
-5. Arduino điều khiển servo đẩy theo lệnh vừa nhận.
+### Giao thức serial (115200 baud)
 
-### Giao thức serial
+- ESP8266 → máy tính: dòng `TRIGGER`
+- Máy tính → ESP8266: `C:R` hoặc `C:N` (mỗi lệnh **một dòng**, như `predict.py` đang gửi)
+- ESP8266 (debug): `ACK CLASS R|N`, `PUSH -> R|N`
 
-- Arduino -> Python: `TRIGGER`
-- Python -> Arduino: `C:R` hoặc `C:N`
-- Arduino -> Python (debug): `ACK CLASS R|N`, `PUSH -> R|N`
+### Đấu nối tham khảo (silkscreen **D2 / D5 / D4** trên NodeMCU / Wemos D1 mini)
 
-### Đấu nối tham khảo
+| Chân | ESP8266 GPIO | Ghi chú |
+|------|---------------|--------|
+| E3F OUT | **D2** (GPIO4) | Cấu hình `INPUT_PULLUP`; mặc định coi **LOW = có vật**. **Chỉ 3.3 V vào GPIO** — nếu cảm biến kéo HIGH 5 V, dùng chia áp / level shifter / opto. |
+| Servo signal | **D5** (GPIO14) | Dây tín hiệu servo; **VCC servo** từ nguồn 5 V ngoài, **GND chung** với module ESP8266 |
 
-- **Servo MG995/MG996**
-  - Signal -> `D9` Nano
-  - Nguồn servo -> nguồn ngoài 5V đủ dòng
-  - GND servo nối chung GND Arduino
-- **Cảm biến E3F**
-  - OUT -> `D2` Nano
-  - GND -> GND chung
-  - VCC theo đúng model cảm biến
+LED trạng thái (nếu có) dùng GPIO2 (**D4**, LED tích hợp thường **active LOW**).
 
-> Lưu ý: nhiều E3F loại công nghiệp chạy 6-36V, cần đảm bảo mức OUT phù hợp ngõ vào 5V Arduino (qua module đệm/optocoupler/chia áp nếu cần).
+> **Cảnh báo:** GPIO ESP8266 **không chịu 5 V**. E3F công nghiệp thường 6–36 V và có thể ra mức HIGH 5 V — phải đảm bảo ngõ vào MCU là **0–3.3 V**.
 
-### Nạp firmware
+### Nạp firmware (Arduino IDE 2.x)
 
-Mở Arduino IDE và nạp file:
+1. **File → Preferences → Additional boards manager URLs:** thêm `http://arduino.esp8266.com/stable/package_esp8266com_index.json`
+2. **Tools → Board → Boards Manager…** → cài **esp8266** (Community)
+3. Chọn board ví dụ **NodeMCU 1.0** hoặc **LOLIN(WEMOS) D1 R2 & mini**
+4. Mở và nạp:
 
-```bash
+```text
 arduino/smart_conveyor_sorter.ino
 ```
 
-### Chạy Python + Arduino
+### Chạy Python + ESP8266
 
 Ví dụ trên **macOS** (cổng USB serial thường là `/dev/cu.*`):
 
@@ -315,7 +328,7 @@ classes:
 |-----------|---------|
 | `train.py` | Huấn luyện YOLO |
 | `predict.py` | Suy luận + in TÁI CHẾ / KHÔNG TÁI CHẾ |
-| `arduino/smart_conveyor_sorter.ino` | Firmware Nano: nhận trigger E3F, nhận class từ Python, điều khiển servo |
+| `arduino/smart_conveyor_sorter.ino` | Firmware ESP8266: trigger E3F, nhận `C:R`/`C:N`, điều khiển servo |
 | `plot_training.py` | Vẽ đồ thị từ `results.csv` |
 | `waste_yolo/recycling.py` | Đọc `config/recycling.yaml` |
 | `waste_yolo/accelerator.py` | Gợi ý thiết bị PyTorch (CUDA / MPS / CPU) |
@@ -327,7 +340,7 @@ classes:
 
 - **Hết VRAM:** giảm `--batch` hoặc `--imgsz`.
 - **`yolov8n.pt` mặc định:** không khớp dữ liệu của bạn — cần train ra `best.pt` rồi mới dùng cho `predict.py`.
-- **Không gửi được Arduino:** kiểm tra `--serial-port`, quyền truy cập cổng COM/tty, và đã cài `pyserial`.
+- **Không gửi được ESP8266:** kiểm tra `--serial-port`, baud 115200, quyền truy cập cổng COM/tty, driver USB–UART, và đã cài `pyserial`.
 - **Servo rung hoặc reset Nano:** dùng nguồn ngoài cho servo, luôn nối chung GND.
 - **Đẩy sai nhịp vật:** tinh chỉnh vị trí camera/E3F, `--track-confirm-frames`, và góc servo trong file `.ino`.
 
