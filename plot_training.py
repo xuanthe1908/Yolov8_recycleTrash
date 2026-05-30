@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import csv
+import sys
 from pathlib import Path
 from typing import Any
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 ROOT = Path(__file__).resolve().parent
@@ -91,6 +95,9 @@ def _build_figure(rows: list[dict[str, str]]) -> Any:
 
 
 def main() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+
     if not DEFAULT_CSV.is_file():
         print(f"Không tìm thấy {DEFAULT_CSV}. Chạy train xong sẽ có file này.")
         return
